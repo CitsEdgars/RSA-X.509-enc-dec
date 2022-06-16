@@ -1,4 +1,5 @@
 from dataclasses import replace
+from msilib.schema import Error
 from pydoc import plain
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -11,11 +12,11 @@ from cryptography.x509.oid import NameOID
 from datetime import datetime, timedelta
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.exceptions import UnsupportedAlgorithm, InvalidSignature, InvalidKey
 from StateManager import StateManager
 import pathlib
 import sys
 import re
-
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         MainWindow.setObjectName("MainWindow")
@@ -156,10 +157,10 @@ class Ui_MainWindow(object):
         self.groupBox_5.setGeometry(QtCore.QRect(240, 170, 741, 451))
         self.groupBox_5.setObjectName("groupBox_5")
         self.RSA_encryption_input = QtWidgets.QTextEdit(self.groupBox_5)
-        self.RSA_encryption_input.setGeometry(QtCore.QRect(10, 40, 291, 391))
+        self.RSA_encryption_input.setGeometry(QtCore.QRect(10, 40, 291, 361))
         self.RSA_encryption_input.setObjectName("RSA_encryption_input")
         self.RSA_encrypton_output = QtWidgets.QTextEdit(self.groupBox_5)
-        self.RSA_encrypton_output.setGeometry(QtCore.QRect(430, 40, 291, 391))
+        self.RSA_encrypton_output.setGeometry(QtCore.QRect(430, 40, 291, 361))
         self.RSA_encrypton_output.setObjectName("RSA_encrypton_output")
         self.label_13 = QtWidgets.QLabel(self.groupBox_5)
         self.label_13.setGeometry(QtCore.QRect(10, 20, 61, 21))
@@ -182,6 +183,12 @@ class Ui_MainWindow(object):
         self.RSA_switch_fields = QtWidgets.QPushButton(self.groupBox_5)
         self.RSA_switch_fields.setGeometry(QtCore.QRect(320, 250, 91, 31))
         self.RSA_switch_fields.setObjectName("RSA_switch_fields")
+        self.RSA_load_input = QtWidgets.QPushButton(self.groupBox_5)
+        self.RSA_load_input.setGeometry(QtCore.QRect(100, 410, 91, 31))
+        self.RSA_load_input.setObjectName("RSA_load_input")
+        self.RSA_save_output = QtWidgets.QPushButton(self.groupBox_5)
+        self.RSA_save_output.setGeometry(QtCore.QRect(530, 410, 91, 31))
+        self.RSA_save_output.setObjectName("RSA_save_output")
         MainWindow.setCentralWidget(self.centralwidget)
         self.statusbar = QtWidgets.QStatusBar(MainWindow)
         self.statusbar.setObjectName("statusbar")
@@ -238,6 +245,8 @@ class Ui_MainWindow(object):
         self.RSA_load_key.setText(_translate("MainWindow", "Load key"))
         self.RSA_clear_fields.setText(_translate("MainWindow", "Clear"))
         self.RSA_switch_fields.setText(_translate("MainWindow", "<---->"))
+        self.RSA_load_input.setText(_translate("MainWindow", "From file"))
+        self.RSA_save_output.setText(_translate("MainWindow", "Save to file"))
 
     def setupFunctionality(self, MainWindow):
         self.sm = StateManager()
@@ -269,6 +278,8 @@ class Ui_MainWindow(object):
         self.RSA_decrypt.clicked.connect(self.decrypt)
         self.RSA_clear_fields.clicked.connect(self.clear_enc_dec_fields)
         self.RSA_switch_fields.clicked.connect(self.switch_enc_dec_fields)
+        self.RSA_save_output.clicked.connect(self.save_enc_dec_result)
+        self.RSA_load_input.clicked.connect(self.read_enc_dec_file)        
 
         # RSA keys
         self.RSA_save_key.clicked.connect(self.save_RSA_keys)
@@ -368,6 +379,16 @@ class Ui_MainWindow(object):
                 return False
             else: return True
 
+    def open_msg_box(self, title, text, padding = 5):
+        msg = QMessageBox()
+        msg.setWindowTitle(title)
+        # Hacky workaround for resizing MessageBox (trust me, it's hard)
+        resize_spaces = " "*padding 
+        msg.setText(text + resize_spaces)
+        msg.setStandardButtons(QMessageBox.Close)
+        msg.exec_()
+
+
     def sign_cert(self):
         # Check empty fields
         if (not (self.verify_filled_field(self.X509_full_name) and
@@ -378,11 +399,8 @@ class Ui_MainWindow(object):
             self.verify_filled_field(self.X509_email) and
             self.verify_filled_field(self.X509_expiry_value) and
             self.verify_filled_field(self.RSA_public_key))):
-            msg = QMessageBox()
-            msg.setWindowTitle("Error")          
-            msg.setText("Please fill out all empty/necessary fields!")
-            msg.setStandardButtons(QMessageBox.Close)
-            msg.exec_()
+
+            self.open_msg_box(title="Error", text="Please fill out all empty/necessary fields!")
             return
 
         match int(self.X509_expiry_delta.currentIndex()):
@@ -429,47 +447,86 @@ class Ui_MainWindow(object):
         self.update_config_values()
 
     def verify_cert(self):
-        msg = QMessageBox()
-        msg.setWindowTitle("Certificate validation")
-        resize_spaces = " "*55 # Hacky workaround for resizing MessageBox (trust me, it's hard)
-        msg.setText("Certificate read successfully, see fields below:" + resize_spaces)
-        msg.setStandardButtons(QMessageBox.Close)
-        msg.setDefaultButton(QMessageBox.Close)
-        def_str = "--------- Subject ---------\n{}\
+        def_str = "Certificate and key read successfully, see fields below:\n"
+        def_str += "--------- Subject ---------\n{}\
                 \n--------- Issuer ---------\n{}\
                 \n--------- Other details ---------\
                 \nSerial Number: {}\
                 \nValid from: {}\
                 \nValid to: {}\
-                \nPublic key:\n{}".format(
+                \n--------- Public key ---------\
+                \nExponent: {}\
+                \nModulo: \n{}\n".format(
                 self.cert.subject.rfc4514_string().replace(",", "\n"),
                 self.cert.issuer.rfc4514_string().replace(",", "\n"),
                 self.cert.serial_number,
                 self.cert.not_valid_before,
                 self.cert.not_valid_after,
+                self.cert.public_key().public_numbers().e,
                 re.sub("(.{64})", "\\1\n", str(self.cert.public_key().public_numbers().n), 0, re.DOTALL))
+
         if self.cert.subject == self.cert.issuer:
             def_str = def_str + "\nIMPORTANT! Issuer and Subject are the same!"
+        # Technically correct would be to check self.keys property (if empty), but checking if key field in GUI is good enough
         if self.verify_filled_field(self.RSA_public_key):
-            if self.cert.public_key().public_numbers().n == int(self.RSA_public_key.toPlainText()):
-                def_str = def_str + "\nIMPORTANT! Loaded key and public key in certificate are the same!"
+            def_str = def_str + "\nIMPORTANT! "
+            try:
+                self.keys.public_key().verify(
+                    self.cert.signature,
+                    self.cert.tbs_certificate_bytes,
+                    # Depends on the algorithm used to create the certificate
+                    padding.PKCS1v15(),
+                    self.cert.signature_hash_algorithm,
+                )
+                def_str += "Everything checks out, certificate is valid!"
+            except InvalidKey:
+                def_str += "Invalid public key!"
+            except InvalidSignature:
+                def_str += "Invalid signature!"
+            except UnsupportedAlgorithm:
+                def_str += "Unsupported algorithm!"
+        else:
+            def_str = def_str + "\n No key was loaded, so no signature verification was done!"
+        self.open_msg_box(title="Certificate validation", text=def_str, padding=55)
+        
 
-        msg.setInformativeText(def_str)
-        msg.exec_()
+    def read_enc_dec_file(self):
+        mypath = pathlib.Path().resolve()
+        file_name = QtWidgets.QFileDialog.getOpenFileName(self.centralwidget, 'Open file', str(mypath), "Text files (*.txt)")[0]
+        if file_name == "": return
+        with open(file_name) as inputFile:
+            self.RSA_encryption_input.setText(''.join(inputFile.read()))
+
+    def save_enc_dec_result(self):
+        with open("output.txt", "w+") as outputFile:
+            for line in self.RSA_encrypton_output.toPlainText():
+                outputFile.write(line)
+            self.open_msg_box(title = "Success!", text="Saved output to \"output.txt\"")
+        
 
     def encrypt(self):
         message = self.RSA_encryption_input.toPlainText().encode('UTF-8')
-        ciphertext = self.keys.public_key().encrypt(
-            message,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
+        # I found that the maximum length of plaintext that can be encrypted is 190 symbols, otherwise it crashes with: "Encryption/decryption failed."
+        # Workround is just to limit the use of the button to messages UNDER OR EQUAL TO 190 symbols.
+        if len(message) <= 190:
+            ciphertext = self.keys.public_key().encrypt(
+                message,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
             )
-        )
-        hex_list = []
-        for i in list(ciphertext): hex_list.append(hex(i))
-        self.RSA_encrypton_output.setText(''.join(map(str, hex_list)))
+            hex_list = []
+            for i in list(ciphertext): hex_list.append(hex(i))
+            self.RSA_encrypton_output.setText(''.join(map(str, hex_list)))
+        else:
+            msg = QMessageBox()
+            msg.setWindowTitle("Input validation")
+            resize_spaces = " "*10 # Hacky workaround for resizing MessageBox (trust me, it's hard)
+            msg.setText("Please reduce the size of the input text. Maximum size is 190 characters.\nCurrent size: {}".format(len(message)) + resize_spaces)
+            msg.setStandardButtons(QMessageBox.Close)
+            msg.exec_()
 
     def decrypt(self):
         input_text = self.RSA_encryption_input.toPlainText()
